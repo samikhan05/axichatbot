@@ -2,6 +2,7 @@ import { useEffect, useRef, forwardRef, useImperativeHandle } from "react";
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 
+// Standard Ready Player Me / Oculus Viseme Mapping for Rhubarb
 const RHUBARB_TO_VISEME = {
   X: "viseme_sil",
   A: "viseme_PP",
@@ -11,7 +12,7 @@ const RHUBARB_TO_VISEME = {
   E: "viseme_O",
   F: "viseme_U",
   G: "viseme_FF",
-  H: "viseme_RR",
+  H: "viseme_TH", 
 };
 
 const Avatar3D = forwardRef((props, ref) => {
@@ -21,18 +22,10 @@ const Avatar3D = forwardRef((props, ref) => {
   const mouthCuesRef = useRef([]);
   const currentVisemeRef = useRef("viseme_sil");
   const mixerRef = useRef(null);
+  const modelRef = useRef(null);
 
   useEffect(() => {
     const container = containerRef.current;
-    
-    // Dynamic sizing based on container
-    const updateSize = () => {
-      const width = container.clientWidth || 300;
-      const height = container.clientHeight || 400;
-      renderer.setSize(width, height);
-      camera.aspect = width / height;
-      camera.updateProjectionMatrix();
-    };
 
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(25, 1, 0.1, 100);
@@ -42,8 +35,14 @@ const Avatar3D = forwardRef((props, ref) => {
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     container.innerHTML = "";
     container.appendChild(renderer.domElement);
-    
-    // Set initial size and add resize listener
+
+    const updateSize = () => {
+      const width = container.clientWidth || 300;
+      const height = container.clientHeight || 400;
+      renderer.setSize(width, height);
+      camera.aspect = width / height;
+      camera.updateProjectionMatrix();
+    };
     updateSize();
     window.addEventListener("resize", updateSize);
 
@@ -54,10 +53,11 @@ const Avatar3D = forwardRef((props, ref) => {
 
     const loader = new GLTFLoader();
     loader.load(
-      "/avatar1.glb",
+      "/avatar3.glb",
       (gltf) => {
         const model = gltf.scene;
         scene.add(model);
+        modelRef.current = model;
 
         const morphMeshes = [];
         model.traverse((obj) => {
@@ -66,29 +66,66 @@ const Avatar3D = forwardRef((props, ref) => {
           }
         });
 
+        // Set bone positions
         model.traverse((obj) => {
           if (obj.name === "Head") {
             obj.rotation.x = 0.01;
-            obj.rotation.y = 0.4;
+            obj.rotation.y = 0.0;
             obj.rotation.z = 0;
           }
           if (obj.name === "Neck") {
             obj.rotation.x = 0.3;
-            obj.rotation.y = -0.5;
+            obj.rotation.y = -0.1;
             obj.rotation.z = 0;
           }
           if (obj.name === "Spine" || obj.name === "Spine1") {
-            obj.rotation.y = 0.7;
+            obj.rotation.y = 0.6;
+          }
+          if (obj.name === "LeftEye" || obj.name === "RightEye") {
+            obj.rotation.set(0, 0, 0);
           }
         });
 
         morphMeshesRef.current = morphMeshes;
 
+        // Apply subtle resting smile
+        morphMeshes.forEach((mesh) => {
+          const dict = mesh.morphTargetDictionary;
+          const influences = mesh.morphTargetInfluences;
+          if (!dict || !influences) return;
+          if (dict["mouthSmile"] !== undefined)
+            influences[dict["mouthSmile"]] = 0.2;
+          if (dict["mouthSmileLeft"] !== undefined)
+            influences[dict["mouthSmileLeft"]] = 0.15;
+          if (dict["mouthSmileRight"] !== undefined)
+            influences[dict["mouthSmileRight"]] = 0.15;
+          if (dict["cheekSquintLeft"] !== undefined)
+            influences[dict["cheekSquintLeft"]] = 0.3;
+          if (dict["cheekSquintRight"] !== undefined)
+            influences[dict["cheekSquintRight"]] = 0.3;
+        });
+
         if (gltf.animations.length > 0) {
           const mixer = new THREE.AnimationMixer(model);
           mixerRef.current = mixer;
-          const action = mixer.clipAction(gltf.animations[0]);
-          action.setEffectiveWeight(0.7);
+
+          const clip = gltf.animations[0];
+          const filteredTracks = clip.tracks.filter((track) => {
+            const name = track.name.toLowerCase();
+            if (name.includes("eye")) return false;
+            if (name.includes("head") && name.includes("quaternion")) return false;
+            if (name.includes("neck") && name.includes("quaternion")) return false;
+            return true;
+          });
+
+          const filteredClip = new THREE.AnimationClip(
+            clip.name,
+            clip.duration,
+            filteredTracks
+          );
+
+          const action = mixer.clipAction(filteredClip);
+          action.setEffectiveWeight(0.6);
           action.play();
         }
       },
@@ -105,31 +142,48 @@ const Avatar3D = forwardRef((props, ref) => {
       const delta = clock.getDelta();
       if (mixerRef.current) mixerRef.current.update(delta);
 
+      if (modelRef.current) {
+        modelRef.current.traverse((obj) => {
+          if (obj.name === "LeftEye" || obj.name === "RightEye") {
+            obj.rotation.set(0, 0, 0);
+          }
+        });
+      }
+
       const targetViseme = currentVisemeRef.current;
+
       morphMeshesRef.current.forEach((mesh) => {
         const dict = mesh.morphTargetDictionary;
         const influences = mesh.morphTargetInfluences;
         if (!dict || !influences) return;
 
+        // Slightly smoothed out the speed to prevent erratic jittering
+        const lerpFactor = 0.45;
+
         Object.keys(dict).forEach((name) => {
+          if (
+            name === "mouthSmile" ||
+            name === "mouthSmileLeft" ||
+            name === "mouthSmileRight" ||
+            name === "cheekSquintLeft" ||
+            name === "cheekSquintRight" ||
+            name === "jawOpen"
+          ) return;
+
           const idx = dict[name];
-          const target = name === targetViseme ? 1.5 : 0;
-          influences[idx] += (target - influences[idx]) * 0.18;
+          // REDUCED to 0.85 so the mouth doesn't over-stretch
+          const target = name === targetViseme ? 0.85 : 0;
+          
+          influences[idx] += (target - influences[idx]) * lerpFactor;
         });
 
-        const isOpen =
-          currentVisemeRef.current !== "viseme_sil" &&
-          currentVisemeRef.current !== "viseme_PP";
-
-        if (dict["mouthOpen"] !== undefined) {
-          const idx = dict["mouthOpen"];
-          const target = isOpen ? 0.7 : 0;
-          influences[idx] += (target - influences[idx]) * 0.18;
-        }
+        // SMART JAW MOVEMENT: Drop jaw specifically for wide open vowel sounds
+        const wideMouthVisemes = ["viseme_aa", "viseme_E", "viseme_O", "viseme_U"];
         if (dict["jawOpen"] !== undefined) {
           const idx = dict["jawOpen"];
-          const target = isOpen ? 0.6 : 0;
-          influences[idx] += (target - influences[idx]) * 0.18;
+          // REDUCED jaw drop from 0.45 to 0.20 for a more natural look
+          const targetJaw = wideMouthVisemes.includes(targetViseme) ? 0.20 : 0;
+          influences[idx] += (targetJaw - influences[idx]) * lerpFactor;
         }
       });
 
@@ -150,7 +204,11 @@ const Avatar3D = forwardRef((props, ref) => {
   const animateSpeech = () => {
     const audio = audioRef.current;
     if (!audio) return;
-    const t = audio.currentTime;
+    
+    // LOOKAHEAD TIMING OFFSET: Add 50ms so visual updates match audio output perfectly
+    const t = audio.currentTime + 0.05; 
+    
+    // Find current mouth cue based on audio playback time
     const cue = mouthCuesRef.current.find((c) => t >= c.start && t < c.end);
     currentVisemeRef.current =
       cue ? RHUBARB_TO_VISEME[cue.value] || "viseme_sil" : "viseme_sil";
