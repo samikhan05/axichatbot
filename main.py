@@ -3,12 +3,16 @@ import time
 import subprocess
 import json
 import soundfile as sf
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from rag_engine import ask, llm
+from collections import defaultdict
 
 RHUBARB_PATH = r"D:\rhubarb\rhubarb.exe"
+
+conversation_store = defaultdict(list)
+MAX_HISTORY = 6
 
 
 def get_mouth_cues(wav_path):
@@ -37,6 +41,7 @@ app.add_middleware(
 
 class ChatRequest(BaseModel):
     message: str
+    session_id: str = "default"
 
 
 class ChatResponse(BaseModel):
@@ -45,12 +50,27 @@ class ChatResponse(BaseModel):
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest):
-    answer = ask(request.message)
+    history = conversation_store[request.session_id]
+    answer = ask(request.message, conversation_history=history)
+    
+    # Save this turn to history
+    history.append({
+        "user": request.message,
+        "assistant": answer
+    })
+    
+    # Keep only last MAX_HISTORY turns
+    if len(history) > MAX_HISTORY:
+        conversation_store[request.session_id] = history[-MAX_HISTORY:]
+    
     return ChatResponse(reply=answer)
 
 
 @app.post("/voice-chat")
-async def voice_chat(audio: UploadFile = File(...)):
+async def voice_chat(
+    audio: UploadFile = File(...),
+    session_id: str = Form(default="default")
+):
     t0 = time.time()
     audio_bytes = await audio.read()
     temp_path = "temp_input.webm"
@@ -67,7 +87,20 @@ async def voice_chat(audio: UploadFile = File(...)):
     t1 = time.time()
     print(f"STT took {t1 - t0:.2f}s")
 
-    answer_text = ask(question_text)
+    # Fetch conversation history and send to LLM
+    history = conversation_store[session_id]
+    answer_text = ask(question_text, conversation_history=history)
+    
+    # Save turn to history
+    history.append({
+        "user": question_text,
+        "assistant": answer_text
+    })
+    
+    # Enforce history limit
+    if len(history) > MAX_HISTORY:
+        conversation_store[session_id] = history[-MAX_HISTORY:]
+
     t2 = time.time()
     print(f"RAG+LLM took {t2 - t1:.2f}s")
 

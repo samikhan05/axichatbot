@@ -31,12 +31,20 @@ SYSTEM_PROMPT = (
     "When mentioning multiple items (like multiple projects or names), state them as short separate sentences instead of one long comma-separated list, since long lists in a single sentence don't sound natural when spoken aloud."
 )
 
+from db_query import (
+    get_all_employees, get_all_projects, get_all_departments,
+    format_employee_context, format_project_context, format_department_context
+)
+
 
 def clean_response(text: str) -> str:
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
-def ask(question: str, max_retries: int = 2) -> str:
+def ask(question: str, conversation_history: list = None, max_retries: int = 2) -> str:
+    if conversation_history is None:
+        conversation_history = []
+
     t0 = time.time()
     query_vector = embed_model.encode(question).tolist()
     t1 = time.time()
@@ -50,24 +58,49 @@ def ask(question: str, max_retries: int = 2) -> str:
     t2 = time.time()
     print(f"Qdrant search took {t2 - t1:.2f}s")
 
-    context = "\n".join([r.payload["text"] for r in results])
+    rag_context = "\n".join([r.payload["text"] for r in results])
+
+    # Pull live structured data from PostgreSQL
+    employees = get_all_employees()
+    projects = get_all_projects()
+    departments = get_all_departments()
+
+    db_context = ""
+    if employees:
+        db_context += "\nCurrent Employees:\n" + format_employee_context(employees)
+    if projects:
+        db_context += "\n\nCurrent Projects:\n" + format_project_context(projects)
+    if departments:
+        db_context += "\n\nDepartments:\n" + format_department_context(departments)
+
     today_str = datetime.now().strftime("%A, %B %d, %Y")
 
-    prompt = f"""Today's date is {today_str}.
+    user_message = f"""Today's date is {today_str}.
 
-Company Information:
-{context}
+Company Documents:
+{rag_context}
+
+Live Company Data:
+{db_context}
 
 Visitor's Question: {question}"""
+
+    # Build messages with full conversation history
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    
+    # Add previous conversation turns
+    for turn in conversation_history:
+        messages.append({"role": "user", "content": turn["user"]})
+        messages.append({"role": "assistant", "content": turn["assistant"]})
+    
+    # Add current question
+    messages.append({"role": "user", "content": user_message})
 
     for attempt in range(max_retries + 1):
         try:
             response = llm.chat.completions.create(
                 model="qwen/qwen3.6-27b",
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
+                messages=messages,
                 reasoning_effort="none",
                 timeout=15.0,
             )

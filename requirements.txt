@@ -6,3 +6,5 @@ python-dotenv
 sentence-transformers
 qdrant-client
 soundfile
+psycopg2-binary
+sqlalchemy

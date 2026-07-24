@@ -6,3 +6,15 @@ services:
       - "6333:6333"
     volumes:
       - ./qdrant_storage:/qdrant/storage
+
+  postgres:
+    image: postgres:16
+    container_name: axichatbot-postgres
+    environment:
+      POSTGRES_DB: axichatbot
+      POSTGRES_USER: axiadmin
+      POSTGRES_PASSWORD: axipass123
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./postgres_data:/var/lib/postgresql/data

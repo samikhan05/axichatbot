@@ -1,166 +1,92 @@
-Company Overview
+# AXI Technologies — Enterprise Knowledge Base
 
-AXI Technologies is a technology company specializing in Artificial Intelligence, cloud computing, software engineering, and enterprise automation. The company focuses on building intelligent systems that improve business productivity and customer experience. Its development teams work on AI-powered chatbots, computer vision, workflow automation, predictive analytics, and custom enterprise software.
+## 1. Company Information & Headquarters
 
-The company emphasizes innovation, continuous learning, and rapid product development. Internal teams follow Agile methodologies with two-week sprints and regular code reviews.
+AXI Technologies is a software engineering and artificial intelligence solutions provider established in 2019. We specialize in enterprise automation, retrieval-augmented generation (RAG) systems, cloud engineering, and computer vision applications.
 
-Departments
+> **Official Mission Statement:**  
+> "To accelerate digital transformation across Pakistan and international markets by building high-reliability, intelligent software architectures."
 
-The company consists of several departments:
+### 1.1 Headquarters & Contact Directory
 
-Artificial Intelligence
-Software Engineering
-DevOps
-Cloud Infrastructure
-Human Resources
-Marketing
-Finance
-Customer Success
-Cybersecurity
-Research & Development
+| Attribute | Details |
+| :--- | :--- |
+| **Headquarters** | 3rd Floor, Centaurus Business Tower, Jinnah Avenue, Blue Area, Islamabad, Pakistan |
+| **Primary Contact** | +92-51-1234567 |
+| **Support Email** | info@axitech.com |
+| **Website** | https://www.axitech.com |
+| **Working Hours** | Monday – Friday | 09:00 AM – 06:00 PM (PKT) |
+| **Lunch & Prayer Break** | Monday – Thursday: 01:00 PM – 02:00 PM \| Friday: 01:00 PM – 02:30 PM |
 
-Each department has its own technical lead and project manager.
+---
 
-AI Department
+## 2. Departmental Structure & Leadership
 
-The AI department develops conversational AI systems, Retrieval-Augmented Generation (RAG) applications, recommendation engines, document intelligence systems, and computer vision models.
+AXI Technologies operates across eight primary functional units. Each department is managed by a designated engineering or operational lead.
 
-The team commonly works with:
+| Department Name | Department Head | Team Size | Core Focus Area |
+| :--- | :--- | :--- | :--- |
+| **Artificial Intelligence** | Dr. Ahmed Raza | 8 | Large Language Models, RAG, Computer Vision, Speech Systems |
+| **Software Engineering** | Sara Khan | 12 | Enterprise Web Applications, Microservices, API Design |
+| **DevOps & Cloud** | Usman Ali | 5 | Infrastructure as Code, CI/CD, AWS/Azure Management |
+| **Cybersecurity** | Bilal Hassan | 4 | Penetration Testing, Security Audits, Compliance |
+| **Research & Development** | Dr. Nida Hussain | 3 | Next-Gen AI Paradigms, Algorithmic Optimization |
+| **Human Resources** | Fatima Malik | 3 | Recruitment, Payroll, Employee Welfare & Training |
+| **Marketing & Sales** | Zara Sheikh | 6 | Client Acquisition, Brand Strategy, Technical Writing |
+| **Finance** | Kamran Mirza | 4 | Budgeting, Financial Compliance, Corporate Accounts |
 
-Python
-FastAPI
-PyTorch
-TensorFlow
-LangChain
-LlamaIndex
-Qdrant
-PostgreSQL
-Redis
-Docker
-Kubernetes
-Internal AI Project: Orion
+---
 
-Project Orion is an internal virtual assistant designed for enterprise knowledge management.
+## 3. Active Client Projects Matrix
 
-Features include:
+The following matrix tracks active software development initiatives within the company repository.
 
-Semantic document search
-Voice interaction
-Multi-language support
-Employee directory lookup
-Meeting summarization
-Document classification
-PDF analysis
-OCR processing
-Email drafting
-Knowledge graph integration
+| Project Name | Client Name | Current Status | Current Phase | Tech Stack | Progress |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **AI Video Receptionist** | Internal | In Progress | Phase 3 (Urdu & DB Integration) | FastAPI, React, Qdrant, Three.js, Rhubarb | 65% |
+| **Inventory Platform** | RetailCo | In Progress | Phase 1 (Core Backend & DB) | Django, PostgreSQL, React, Redis | 40% |
+| **Patient Scheduler** | MediHealth | In Progress | Phase 2 (Appointment Engine) | FastAPI, PostgreSQL, React, Celery | 55% |
+| **Smart Fleet Manager** | LogiPak | In Progress | Phase 1 (GPS Integration) | FastAPI, PostgreSQL, React, Google Maps | 25% |
+| **E-Learning Platform** | EduPak | In Progress | Phase 3 (AI Recommendation Engine) | Django, PostgreSQL, React, PyTorch | 70% |
 
-The assistant supports English, Urdu, Arabic, French, and Spanish.
+### 3.1 Detailed Project Summaries
 
-Employee Policies
+#### A. AI Video Reception Chatbot
+An internal RAG-driven virtual assistant interfacing with office visitors using live speech processing and a rendering 3D avatar.
+* **Objectives:** Automate front-desk visitor registration, answer company policy queries, and provide real-time updates on active team members.
+* **Key Architecture Components:** Groq LLM API, Qdrant Vector Engine, PostgreSQL Relational Store, Three.js Client Interface, Rhubarb Phoneme Extractor.
 
-Employees work from Monday to Friday.
+#### B. Inventory Management Platform (RetailCo)
+An enterprise resource management engine tailored for a retail network of over 200 physical branches across Pakistan.
+* **Objectives:** Real-time stock synchronisation, automated supplier purchase orders, and sales reporting dashboards.
 
-Working hours are:
+---
 
-9:00 AM – 6:00 PM
-One-hour lunch break
-Flexible remote work twice a week
+## 4. Employee Policies & Governance
 
-Annual leave:
+### 4.1 Leave Allocation Schedule
 
-20 paid vacation days
-10 sick leaves
-5 emergency leaves
-Security Guidelines
+| Leave Type | Annual Allocation | Approval Required | Rollover Policy |
+| :--- | :--- | :--- | :--- |
+| **Annual Paid Vacation** | 20 Days | Yes (Line Manager + HR) | Max 5 days to next calendar year |
+| **Medical / Sick Leave** | 10 Days | Medical Certificate (>2 days) | Non-cumulative |
+| **Casual / Emergency** | 5 Days | Intimation before 10:00 AM | Non-cumulative |
+| **Maternity / Paternity** | 90 / 10 Days | HR Verification | Standard Statutory Terms |
 
-Employees should:
+### 4.2 Security Protocols
+1. **Multi-Factor Authentication (MFA):** Mandatory across all GitHub, AWS, and Google Workspace accounts.
+2. **Credential Hygiene:** Passwords must be rotated every 90 days. Storing API keys or `.env` secrets in public Git repositories is strictly prohibited.
+3. **Remote Access:** All off-site software development must be conducted via the company encrypted VPN tunnel.
 
-Enable multi-factor authentication.
-Rotate passwords every 90 days.
-Never share API keys publicly.
-Encrypt confidential documents.
-Report suspicious emails immediately.
-Use company VPN while working remotely.
-Software Development Standards
+---
 
-Developers are encouraged to:
+## 5. Frequently Asked Questions (FAQ)
 
-Write unit tests.
-Maintain at least 80% code coverage.
-Follow PEP-8 for Python.
-Use feature branches.
-Submit pull requests for review.
-Document public APIs.
-Data Infrastructure
+**Q: How does the AI Receptionist retrieve accurate project information?**  
+A: The system uses a hybrid approach: static company handbooks are retrieved from a Qdrant vector database using dense embeddings, while real-time metrics (e.g., project progress percentage, employee availability) are queried directly from PostgreSQL tables.
 
-The analytics platform processes approximately 40 million records every month.
+**Q: What is the official probationary period for new engineering hires?**  
+A: All new technical and administrative employees undergo a standard 3-month probation period, after which a performance evaluation is conducted by their respective Department Lead.
 
-Data sources include:
-
-CRM
-ERP
-IoT devices
-Customer support tickets
-Mobile applications
-Website analytics
-
-The data warehouse stores over 250 TB of structured information.
-
-Products
-
-Example internal products include:
-
-AXI Vision
-AXI Assist
-AXI Analytics
-AXI Secure
-AXI Flow
-AXI Voice
-AXI Insight
-AXI Monitor
-Fictional Information (Intentionally False)
-
-The following section is completely fictional and exists only to test RAG retrieval.
-
-AXI Technologies operates a secret research laboratory beneath the Margalla Hills.
-Every employee receives a company-owned autonomous drone during onboarding.
-The CEO personally reviews every line of production code before deployment.
-The company owns a quantum computer named "Phoenix-Q" with 4096 stable qubits.
-Engineers are required to wear augmented reality glasses during meetings.
-The cafeteria serves free sushi every Wednesday and free pizza every Friday.
-Every conference room contains a holographic AI assistant named "Nova."
-Employees can reserve flying electric vehicles for commuting.
-The internal chatbot can understand dolphin language with 98.7% accuracy.
-The company maintains data centers on the Moon and one experimental server on Mars.
-An AI robot named "Atlas-X" performs daily office inspections.
-Developers receive a bonus of $50,000 for every critical bug they fix within one hour.
-The company has an underground tunnel connecting its office directly to Islamabad International Airport.
-Employees have access to a teleportation prototype for executive travel.
-The AI team has developed software capable of predicting stock prices with 100% accuracy.
-Every intern is assigned a humanoid robot assistant.
-The office rooftop contains a small space launch facility for nanosatellites.
-Coffee machines automatically recognize employees using facial recognition and prepare their favorite drink.
-The company owns a private island used exclusively for annual hackathons.
-Internal meetings are occasionally attended by an AI-generated digital board member named "Astra."
-Frequently Asked Questions
-
-Q: Which database is used for vector search?
-
-A: Qdrant.
-
-Q: Which backend framework is commonly used?
-
-A: FastAPI.
-
-Q: Which programming language is most frequently used?
-
-A: Python.
-
-Q: Which methodology does the engineering team follow?
-
-A: Agile.
-
-Q: How often are passwords rotated?
-
-A: Every 90 days.
+**Q: Where is the AXI Technologies head office located?**  
+A: The head office is located at 3rd Floor, Centaurus Business Tower, Jinnah Avenue, Blue Area, Islamabad, Pakistan.
