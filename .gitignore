@@ -1,29 +1,26 @@
 # Python environment
 venv/
-
-# Environment variables — never upload API keys
+# Environment variables - never upload API keys
 .env
-
-# Qdrant data — database files, too large and machine-specific
+# Qdrant data - database files, too large and machine-specific
 qdrant_storage/
 qdrant_data/
-
 # Runtime temp files generated during execution
 last_response.wav
 last_response_normalized.wav
 temp_input.webm
-
 # Python cache
 __pycache__/
 *.pyc
 *.pyo
-
 # VS Code settings
 .vscode/
-
 # OS files
 .DS_Store
 Thumbs.db
-
-#postgres files
+# Postgres files
 postgres_data/
+# Frontend build artifacts
+axichatbot-frontend/node_modules/
+axichatbot-frontend/dist/
+axichatbot-frontend/.vite/

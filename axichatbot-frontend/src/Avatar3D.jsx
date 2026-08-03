@@ -1,248 +1,175 @@
-import { useEffect, useRef, forwardRef, useImperativeHandle } from "react";
-import * as THREE from "three";
-import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { useEffect, useRef, forwardRef, useImperativeHandle, useState } from "react";
+import { SimliClient, LogLevel } from "simli-client";
 
-// Standard Ready Player Me / Oculus Viseme Mapping for Rhubarb
-const RHUBARB_TO_VISEME = {
-  X: "viseme_sil",
-  A: "viseme_PP",
-  B: "viseme_kk",
-  C: "viseme_E",
-  D: "viseme_aa",
-  E: "viseme_O",
-  F: "viseme_U",
-  G: "viseme_FF",
-  H: "viseme_TH", 
-};
+const API_BASE = "http://localhost:8000";
+
+// Exactly 6KB chunks, per CTO recommendation
+const CHUNK_SIZE = 6144; 
+
+function wavBase64ToPcm16(base64Wav) {
+  const binary = atob(base64Wav);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+  const view = new DataView(bytes.buffer);
+  let offset = 12;
+  while (offset < bytes.length) {
+    const chunkId = String.fromCharCode(
+      bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]
+    );
+    const chunkSize = view.getUint32(offset + 4, true);
+    if (chunkId === "data") {
+      return bytes.slice(offset + 8, offset + 8 + chunkSize);
+    }
+    offset += 8 + chunkSize;
+  }
+  console.warn("No 'data' chunk found in WAV — falling back to byte 44");
+  return bytes.slice(44);
+}
+
+// --- NEW FUNCTION: The Silence Trimmer ---
+// Scans the PCM audio backwards to find where the actual voice stops,
+// stripping out the invisible "room tone" the TTS engine leaves at the end.
+function trimTrailingSilence(pcmBytes, threshold = 150) {
+  const view = new DataView(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.byteLength);
+  let lastVoiceIndex = 0;
+  
+  // Scan backwards through the audio (2 bytes per sample for PCM16)
+  for (let i = view.byteLength - 2; i >= 0; i -= 2) {
+    const sampleAmplitude = Math.abs(view.getInt16(i, true));
+    
+    // If we hit a sound louder than our silence threshold, mark this as the true end
+    if (sampleAmplitude > threshold) {
+      lastVoiceIndex = i;
+      break;
+    }
+  }
+  
+  // Keep exactly 0.1 seconds (3200 bytes) of padding after the voice stops 
+  // to prevent an unnatural, abrupt mouth snap, but eliminate the 0.5s overshoot.
+  const safeEndIndex = Math.min(pcmBytes.length, lastVoiceIndex + 3200);
+  return pcmBytes.slice(0, safeEndIndex);
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const Avatar3D = forwardRef((props, ref) => {
-  const containerRef = useRef(null);
-  const morphMeshesRef = useRef([]);
+  const videoRef = useRef(null);
   const audioRef = useRef(null);
-  const mouthCuesRef = useRef([]);
-  const currentVisemeRef = useRef("viseme_sil");
-  const mixerRef = useRef(null);
-  const modelRef = useRef(null);
+  const simliClientRef = useRef(null);
+  const connectingRef = useRef(null);
+  
+  const [status, setStatus] = useState("connecting"); 
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
 
-  useEffect(() => {
-    const container = containerRef.current;
+  const closeStaleClient = () => {
+    simliClientRef.current?.close?.();
+    simliClientRef.current = null;
+  };
 
-    const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(25, 1, 0.1, 100);
-    camera.position.set(0.02, 1.65, 1.3);
+  const connectFresh = async () => {
+    setStatus("connecting");
+    const res = await fetch(`${API_BASE}/simli-session`);
+    const { sessionToken, iceServers } = await res.json();
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    container.innerHTML = "";
-    container.appendChild(renderer.domElement);
-
-    const updateSize = () => {
-      const width = container.clientWidth || 300;
-      const height = container.clientHeight || 400;
-      renderer.setSize(width, height);
-      camera.aspect = width / height;
-      camera.updateProjectionMatrix();
-    };
-    updateSize();
-    window.addEventListener("resize", updateSize);
-
-    scene.add(new THREE.AmbientLight(0xffffff, 1.2));
-    const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
-    dirLight.position.set(0.5, 1, 1);
-    scene.add(dirLight);
-
-    const loader = new GLTFLoader();
-    loader.load(
-      "/avatar3.glb",
-      (gltf) => {
-        const model = gltf.scene;
-        scene.add(model);
-        modelRef.current = model;
-
-        const morphMeshes = [];
-        model.traverse((obj) => {
-          if (obj.isMesh && obj.morphTargetDictionary) {
-            morphMeshes.push(obj);
-          }
-        });
-
-        // Set bone positions
-        model.traverse((obj) => {
-          if (obj.name === "Head") {
-            obj.rotation.x = 0.01;
-            obj.rotation.y = 0.0;
-            obj.rotation.z = 0;
-          }
-          if (obj.name === "Neck") {
-            obj.rotation.x = 0.3;
-            obj.rotation.y = -0.1;
-            obj.rotation.z = 0;
-          }
-          if (obj.name === "Spine" || obj.name === "Spine1") {
-            obj.rotation.y = 0.6;
-          }
-          if (obj.name === "LeftEye" || obj.name === "RightEye") {
-            obj.rotation.set(0, 0, 0);
-          }
-        });
-
-        morphMeshesRef.current = morphMeshes;
-
-        // Apply subtle resting smile
-        morphMeshes.forEach((mesh) => {
-          const dict = mesh.morphTargetDictionary;
-          const influences = mesh.morphTargetInfluences;
-          if (!dict || !influences) return;
-          if (dict["mouthSmile"] !== undefined)
-            influences[dict["mouthSmile"]] = 0.2;
-          if (dict["mouthSmileLeft"] !== undefined)
-            influences[dict["mouthSmileLeft"]] = 0.15;
-          if (dict["mouthSmileRight"] !== undefined)
-            influences[dict["mouthSmileRight"]] = 0.15;
-          if (dict["cheekSquintLeft"] !== undefined)
-            influences[dict["cheekSquintLeft"]] = 0.3;
-          if (dict["cheekSquintRight"] !== undefined)
-            influences[dict["cheekSquintRight"]] = 0.3;
-        });
-
-        if (gltf.animations.length > 0) {
-          const mixer = new THREE.AnimationMixer(model);
-          mixerRef.current = mixer;
-
-          const clip = gltf.animations[0];
-          const filteredTracks = clip.tracks.filter((track) => {
-            const name = track.name.toLowerCase();
-            if (name.includes("eye")) return false;
-            if (name.includes("head") && name.includes("quaternion")) return false;
-            if (name.includes("neck") && name.includes("quaternion")) return false;
-            return true;
-          });
-
-          const filteredClip = new THREE.AnimationClip(
-            clip.name,
-            clip.duration,
-            filteredTracks
-          );
-
-          const action = mixer.clipAction(filteredClip);
-          action.setEffectiveWeight(0.6);
-          action.play();
-        }
-      },
-      undefined,
-      (err) => console.error("Avatar failed to load:", err)
+    const client = new SimliClient(
+      sessionToken,
+      videoRef.current,
+      audioRef.current,
+      iceServers,
+      LogLevel.INFO,
+      "p2p"
     );
 
-    let running = true;
-    const clock = new THREE.Clock();
-
-    const animate = () => {
-      if (!running) return;
-
-      const delta = clock.getDelta();
-      if (mixerRef.current) mixerRef.current.update(delta);
-
-      if (modelRef.current) {
-        modelRef.current.traverse((obj) => {
-          if (obj.name === "LeftEye" || obj.name === "RightEye") {
-            obj.rotation.set(0, 0, 0);
-          }
-        });
-      }
-
-      const targetViseme = currentVisemeRef.current;
-
-      morphMeshesRef.current.forEach((mesh) => {
-        const dict = mesh.morphTargetDictionary;
-        const influences = mesh.morphTargetInfluences;
-        if (!dict || !influences) return;
-
-        // Slightly smoothed out the speed to prevent erratic jittering
-        const lerpFactor = 0.45;
-
-        Object.keys(dict).forEach((name) => {
-          if (
-            name === "mouthSmile" ||
-            name === "mouthSmileLeft" ||
-            name === "mouthSmileRight" ||
-            name === "cheekSquintLeft" ||
-            name === "cheekSquintRight" ||
-            name === "jawOpen"
-          ) return;
-
-          const idx = dict[name];
-          // REDUCED to 0.85 so the mouth doesn't over-stretch
-          const target = name === targetViseme ? 0.85 : 0;
-          
-          influences[idx] += (target - influences[idx]) * lerpFactor;
-        });
-
-        // SMART JAW MOVEMENT: Drop jaw specifically for wide open vowel sounds
-        const wideMouthVisemes = ["viseme_aa", "viseme_E", "viseme_O", "viseme_U"];
-        if (dict["jawOpen"] !== undefined) {
-          const idx = dict["jawOpen"];
-          // REDUCED jaw drop from 0.45 to 0.20 for a more natural look
-          const targetJaw = wideMouthVisemes.includes(targetViseme) ? 0.20 : 0;
-          influences[idx] += (targetJaw - influences[idx]) * lerpFactor;
-        }
-      });
-
-      renderer.render(scene, camera);
-      requestAnimationFrame(animate);
-    };
-    animate();
-
-    return () => {
-      running = false;
-      window.removeEventListener("resize", updateSize);
-      if (mixerRef.current) mixerRef.current.stopAllAction();
-      renderer.dispose();
-      container.innerHTML = "";
-    };
-  }, []);
-
-  const animateSpeech = () => {
-    const audio = audioRef.current;
-    if (!audio) return;
+    client.on("error", (detail) => {
+      console.error("Simli error event:", detail);
+      setStatus("error");
+    });
     
-    // LOOKAHEAD TIMING OFFSET: Add 50ms so visual updates match audio output perfectly
-    const t = audio.currentTime + 0.05; 
+    client.on("startup_error", (message) => {
+      console.error("Simli startup_error event:", message);
+      setStatus("error");
+    });
     
-    // Find current mouth cue based on audio playback time
-    const cue = mouthCuesRef.current.find((c) => t >= c.start && t < c.end);
-    currentVisemeRef.current =
-      cue ? RHUBARB_TO_VISEME[cue.value] || "viseme_sil" : "viseme_sil";
+    client.on("stop", () => {
+      console.warn("Simli: connection stopped");
+      simliClientRef.current = null;
+      setStatus("idle"); 
+    });
 
-    if (!audio.paused && !audio.ended) {
-      requestAnimationFrame(animateSpeech);
-    } else {
-      currentVisemeRef.current = "viseme_sil";
+    simliClientRef.current = client;
+    await client.start();
+    
+    setStatus("ready");
+    setHasLoadedOnce(true);
+    return client;
+  };
+
+  const ensureConnected = async () => {
+    if (simliClientRef.current) return simliClientRef.current;
+    if (connectingRef.current) return connectingRef.current;
+
+    connectingRef.current = connectFresh();
+    try {
+      return await connectingRef.current;
+    } catch (err) {
+      console.error("Simli session failed to start:", err);
+      setStatus("error");
+      simliClientRef.current = null;
+      throw err;
+    } finally {
+      connectingRef.current = null;
     }
   };
 
+  useEffect(() => {
+    ensureConnected();
+    return () => closeStaleClient();
+  }, []);
+
   useImperativeHandle(ref, () => ({
-    speak: (base64Audio, mouthCues) => {
-      mouthCuesRef.current = mouthCues || [];
-      const audio = new Audio(`data:audio/wav;base64,${base64Audio}`);
-      audioRef.current = audio;
-      audio.oncanplaythrough = () => {
-        audio.play().catch((err) => console.error("Playback failed:", err));
-        animateSpeech();
-      };
-      audio.load();
+    speak: async (base64Audio) => {
+      let client;
+      try {
+        client = await ensureConnected(); 
+      } catch {
+        return;
+      }
+
+      client.ClearBuffer?.();
+
+      let pcm = wavBase64ToPcm16(base64Audio);
+      
+      // Apply the trimmer to chop off the TTS trailing static
+      pcm = trimTrailingSilence(pcm);
+
+      try {
+        for (let offset = 0; offset < pcm.length; offset += CHUNK_SIZE) {
+          client.sendAudioData(pcm.slice(offset, offset + CHUNK_SIZE));
+          await sleep(2); 
+        }
+      } catch (err) {
+        console.error("sendAudioData failed, discarding session:", err);
+        closeStaleClient();
+        setStatus("error");
+      }
     },
   }));
 
   return (
-    <div
-      ref={containerRef}
-      style={{
-        width: "100%",
-        height: "100%",
-        minHeight: "350px",
-        position: "relative",
-      }}
-    />
+    <div style={{ width: "100%", height: "100%", minHeight: "350px", position: "relative", borderRadius: "12px", overflow: "hidden", background: "linear-gradient(135deg, #1a2a3a, #0a0a0a)" }}>
+      <video ref={videoRef} autoPlay playsInline poster="/face.png" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+      <audio ref={audioRef} autoPlay />
+      
+      {!hasLoadedOnce && status !== "ready" && (
+        <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "12px", zIndex: 10, background: "#111" }}>
+          <img src="/logo.png" alt="" style={{ width: "56px", height: "56px", opacity: 0.6 }} />
+          <div style={{ color: "#cfd8e3", fontSize: "0.9rem" }}>
+            {status === "error" ? "Reconnecting…" : "Connecting to Receptionist…"}
+          </div>
+        </div>
+      )}
+    </div>
   );
 });
 

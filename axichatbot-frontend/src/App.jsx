@@ -107,12 +107,10 @@ function App() {
       addMessage("user", data.transcript);
       addMessage("bot", data.reply);
 
-      console.log("Mouth cues received:", data.mouthCues);
 
       // Play generated audio with lip-sync mouth cues
       avatarRef.current?.speak(
-        data.audio_base64,
-        data.mouthCues
+        data.audio_base64
       );
     } catch (err) {
       console.error("Voice chat failed:", err);

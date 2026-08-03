@@ -5,9 +5,10 @@ An AI-powered video receptionist that greets visitors, answers questions about t
 ## Screenshots
 
 ### Avatar & Chat Interface
-![Avatar Interface](screenshot/interface.png)
+![Avatar Interface](screenshot/interface1.png)
 
 ## Features
+- Text-to-Text conversation
 - Speech-to-speech conversation (speak to it, it speaks back)
 - Grounded answers from real company documents (RAG)
 - 3D avatar with real-time lip sync
@@ -21,8 +22,8 @@ An AI-powered video receptionist that greets visitors, answers questions about t
 - **Text-to-Speech:** Groq Orpheus TTS
 - **Embeddings:** BGE-M3
 - **Vector DB:** Qdrant (Docker)
-- **Lip Sync:** Rhubarb Lip Sync
-- **Avatar:** Avaturn GLB + Three.js morph target animation
+- **Lip Sync & 3D Avatar:** Simli 
+
 
 ## Setup
 
@@ -30,7 +31,7 @@ An AI-powered video receptionist that greets visitors, answers questions about t
 - Python 3.11+
 - Node.js 18+
 - Docker Desktop
-- Rhubarb Lip Sync binary at `D:\rhubarb\rhubarb.exe`
+- Simli API key + face_id (signup at simli.com)
 
 ### Backend
 ```bash
@@ -41,6 +42,15 @@ pip install -r requirements.txt
 
 Create a `.env` file:
 GROQ_API_KEY=your_groq_api_key_here
+
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=axichatbot
+POSTGRES_USER=your_postgres_user
+POSTGRES_PASSWORD=your_postgres_password
+
+SIMLI_API_KEY=your_simli_api_key_here
+SIMLI_FACE_ID=your_simli_face_id_here
 
 Start Qdrant:
 ```bash
@@ -54,7 +64,7 @@ python ingest.py
 
 Start backend:
 ```bash
-uvicorn main:app
+uvicorn main:app or python -m uvicorn main:app
 ```
 
 ### Frontend
@@ -64,9 +74,12 @@ npm install
 npm run dev
 ```
 
-Place your avatar GLB file at `axichatbot-frontend/public/avatar1.glb`.
+## Connect to the PostgreSQL Database
+Run the following command to access the PostgreSQL database running in the Docker container:
+```bash
+docker exec -it axichatbot-postgres psql -U axiadmin -d axichatbot
+```
 
 ## Notes
 - The `sample_docs/` folder contains placeholder company information. Replace with your own markdown files before use.
-- The avatar GLB file is not included in the repo (file size). Download a Type 2 avatar with animation from avaturn.me.
-- Rhubarb Lip Sync binary is not included — download separately (see Setup above).
+- Avatar rendering and lip sync are handled entirely through the Simli API — no local GLB avatar file, Rhubarb binary, or morph-target animation setup is required.
