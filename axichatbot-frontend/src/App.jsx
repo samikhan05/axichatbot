@@ -11,6 +11,9 @@ function App() {
   const [isRecording, setIsRecording] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
 
+  // Generate a unique session ID once when the app loads
+  const sessionIdRef = useRef(`session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`);
+
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const avatarRef = useRef(null);
@@ -36,6 +39,7 @@ function App() {
         },
         body: JSON.stringify({
           message: question,
+          session_id: sessionIdRef.current,
         }),
       });
 
@@ -90,6 +94,7 @@ function App() {
 
     const formData = new FormData();
     formData.append("audio", audioBlob, "recording.webm");
+    formData.append("session_id", sessionIdRef.current);
 
     try {
       const res = await fetch(`${API_BASE}/voice-chat`, {
@@ -102,12 +107,10 @@ function App() {
       addMessage("user", data.transcript);
       addMessage("bot", data.reply);
 
-      console.log("Mouth cues received:", data.mouthCues);
 
       // Play generated audio with lip-sync mouth cues
       avatarRef.current?.speak(
-        data.audio_base64,
-        data.mouthCues
+        data.audio_base64
       );
     } catch (err) {
       console.error("Voice chat failed:", err);
