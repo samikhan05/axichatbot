@@ -160,8 +160,16 @@ body {
 }
 
 .message-wrapper.bot {
-  justify-content: flex-start;
+  flex-direction: column;
+  align-items: flex-start;
 }
+
+/* Urdu script: right-to-left with a Nastaliq-friendly font stack */
+.message:dir(rtl) {
+  font-family: "Noto Nastaliq Urdu", "Jameel Noori Nastaleeq", "Segoe UI", sans-serif;
+  line-height: 2;
+}
+
 
 .message {
   padding: 12px 18px;

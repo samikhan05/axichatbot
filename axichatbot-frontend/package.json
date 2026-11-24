@@ -10,12 +10,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@met4citizen/talkinghead": "^1.7.0",
-    "livekit-client": "^2.21.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "simli-client": "^3.0.2",
-    "three": "^0.185.1"
+    "simli-client": "^3.0.2"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
