@@ -24,3 +24,8 @@ postgres_data/
 axichatbot-frontend/node_modules/
 axichatbot-frontend/dist/
 axichatbot-frontend/.vite/
+# local voice comparison clips
+voice_samples/
+
+# runtime logs
+logs/

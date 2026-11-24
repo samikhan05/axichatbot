@@ -1,4 +1,4 @@
-﻿aiohappyeyeballs==2.7.1
+aiohappyeyeballs==2.7.1
 aiohttp==3.14.1
 aiosignal==1.4.0
 annotated-doc==0.0.4
@@ -111,3 +111,4 @@ websockets==15.0.1
 xxhash==3.8.1
 yarl==1.24.2
 zstandard==0.25.0
+azure-cognitiveservices-speech==1.53.1

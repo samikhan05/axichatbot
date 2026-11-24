@@ -13,9 +13,12 @@ def seed():
     departments = [
         Department(name="Artificial Intelligence", head="Dr. Ahmed Raza", team_size=8, description="Develops AI systems, RAG applications, and computer vision models."),
         Department(name="Software Engineering", head="Sara Khan", team_size=12, description="Builds enterprise software and backend systems."),
-        Department(name="DevOps", head="Usman Ali", team_size=5, description="Manages infrastructure, CI/CD pipelines, and deployments."),
-        Department(name="Cloud Infrastructure", head="Bilal Hassan", team_size=4, description="Manages cloud resources and architecture."),
-        Department(name="Human Resources", head="Fatima Malik", team_size=3, description="Handles recruitment, policies, and employee welfare."),
+        Department(name="DevOps & Cloud", head="Usman Ali", team_size=5, description="Infrastructure as Code, CI/CD pipelines, and AWS/Azure management."),
+        Department(name="Cybersecurity", head="Bilal Hassan", team_size=4, description="Penetration testing, security audits, and compliance."),
+        Department(name="Research & Development", head="Dr. Nida Hussain", team_size=3, description="Next-generation AI paradigms and algorithmic optimization."),
+        Department(name="Human Resources", head="Fatima Malik", team_size=3, description="Recruitment, payroll, employee welfare, and training."),
+        Department(name="Marketing & Sales", head="Zara Sheikh", team_size=6, description="Client acquisition, brand strategy, and technical writing."),
+        Department(name="Finance", head="Kamran Mirza", team_size=4, description="Budgeting, financial compliance, and corporate accounts."),
     ]
     db.add_all(departments)
 
@@ -23,7 +26,12 @@ def seed():
     employees = [
         Employee(name="Dr. Ahmed Raza", role="AI Department Lead", department="Artificial Intelligence", email="ahmed.raza@axitech.com", phone="+92-300-1234567"),
         Employee(name="Sara Khan", role="Engineering Lead", department="Software Engineering", email="sara.khan@axitech.com", phone="+92-300-2345678"),
-        Employee(name="Usman Ali", role="DevOps Lead", department="DevOps", email="usman.ali@axitech.com", phone="+92-300-3456789"),
+        Employee(name="Usman Ali", role="DevOps & Cloud Lead", department="DevOps & Cloud", email="usman.ali@axitech.com", phone="+92-300-3456789"),
+        Employee(name="Bilal Hassan", role="Head of Cybersecurity", department="Cybersecurity", email="bilal.hassan@axitech.com", phone="+92-300-7890123"),
+        Employee(name="Dr. Nida Hussain", role="Head of Research & Development", department="Research & Development", email="nida.hussain@axitech.com", phone="+92-300-8901234"),
+        Employee(name="Fatima Malik", role="HR Manager", department="Human Resources", email="fatima.malik@axitech.com", phone="+92-300-9012345"),
+        Employee(name="Zara Sheikh", role="Head of Marketing & Sales", department="Marketing & Sales", email="zara.sheikh@axitech.com", phone="+92-301-1234567"),
+        Employee(name="Kamran Mirza", role="Finance Manager", department="Finance", email="kamran.mirza@axitech.com", phone="+92-301-2345678"),
         Employee(name="Zain Ahmed", role="Backend Engineer", department="Artificial Intelligence", email="zain.ahmed@axitech.com", phone="+92-300-4567890"),
         Employee(name="Ayesha Siddiqui", role="Frontend Developer", department="Software Engineering", email="ayesha.s@axitech.com", phone="+92-300-5678901"),
         Employee(name="Hassan Tariq", role="ML Engineer", department="Artificial Intelligence", email="hassan.t@axitech.com", phone="+92-300-6789012"),
@@ -58,6 +66,24 @@ def seed():
             tech_stack="FastAPI, PostgreSQL, React, Celery",
             progress_percent=55,
             description="An automated patient scheduling and appointment management system for healthcare."
+        ),
+        Project(
+            name="Smart Fleet Manager",
+            client="LogiPak",
+            status="In Progress",
+            current_phase="Phase 1 - GPS Integration",
+            tech_stack="FastAPI, PostgreSQL, React, Google Maps",
+            progress_percent=25,
+            description="Real-time fleet tracking and route management for a logistics company."
+        ),
+        Project(
+            name="E-Learning Platform",
+            client="EduPak",
+            status="In Progress",
+            current_phase="Phase 3 - AI Recommendation Engine",
+            tech_stack="Django, PostgreSQL, React, PyTorch",
+            progress_percent=70,
+            description="An online learning platform with AI-powered course recommendations."
         ),
     ]
     db.add_all(projects)

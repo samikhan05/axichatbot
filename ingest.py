@@ -1,26 +1,46 @@
 """
-ingest.py — Company knowledge base ingestion for RAG.
+ingest.py — Company knowledge base ingestion for hybrid RAG.
 
 Supports:
-- Markdown (.md) files: header-aware chunking, tables kept atomic.
-- PDF (.pdf) files: page-aware chunking, tables extracted separately, image placeholders.
+- Markdown (.md): header-aware sections, structure-aware chunking
+  (paragraphs / list items / sentences), tables split into row groups
+  with the header row repeated in every group.
+- PDF (.pdf): page-aware chunking, tables extracted separately and their
+  area removed from the page text (no duplicated table text), image
+  placeholders.
 
-Every chunk is embedded with BGE-M3 and stored in Qdrant with metadata
-(source file, section/page, chunk type) so retrieval results can be
-traced back to exactly where they came from.
+Chunking techniques used:
+1. Contextual chunk headers — every chunk is embedded with
+   "Document: <title> | Section: <h1 > h2 > h3>" prepended, so a chunk
+   like "20 Days | Yes" still carries the meaning "Leave Allocation".
+2. Sentence-level overlap — the next chunk repeats the last whole
+   sentence(s) of the previous chunk (never a word cut in half).
+3. Table row-grouping — large tables are split into groups of rows, each
+   with the header row, so a question about one row retrieves a small,
+   focused chunk instead of the whole table.
 
-Install the new dependency before running:
-    pip install pdfplumber
+Every chunk gets two vectors in Qdrant:
+- "dense":  BGE-M3 embedding (semantic, multilingual incl. Urdu script)
+- "sparse": BM25-style keyword vector (exact names, emails, acronyms)
+which rag_engine.py fuses with Reciprocal Rank Fusion (hybrid search).
+
+Re-run after changing documents:
+    python ingest.py
 """
 
 import glob
+import os
 import re
-import hashlib
+import uuid
 
 import pdfplumber
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
-from qdrant_client.models import VectorParams, Distance, PointStruct
+from qdrant_client.models import (
+    VectorParams, Distance, PointStruct, SparseVectorParams, Modifier,
+)
+
+from sparse_encoder import encode_document
 
 # ---------------------------------------------------------------------------
 # Config
@@ -29,83 +49,155 @@ from qdrant_client.models import VectorParams, Distance, PointStruct
 MODEL_NAME = "BAAI/bge-m3"
 COLLECTION_NAME = "company_knowledge"
 DOCS_DIR = "sample_docs"
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 
-CHUNK_SIZE = 500       # target characters per chunk
-CHUNK_OVERLAP = 100    # characters carried into the next chunk for context
+DENSE_VECTOR = "dense"
+SPARSE_VECTOR = "sparse"
+
+CHUNK_SIZE = 600        # target characters per chunk (body, without header)
+CHUNK_OVERLAP = 150     # max characters of whole sentences carried forward
+TABLE_ROWS_PER_CHUNK = 4
 
 assert CHUNK_OVERLAP < CHUNK_SIZE, "CHUNK_OVERLAP must be smaller than CHUNK_SIZE"
 
-model = SentenceTransformer(MODEL_NAME)
+_model = None
+
+
+def get_model():
+    global _model
+    if _model is None:
+        _model = SentenceTransformer(MODEL_NAME)
+    return _model
 
 
 # ---------------------------------------------------------------------------
-# Generic sentence-aware chunker with overlap
+# Text cleanup + structure-aware sentence splitting
 # ---------------------------------------------------------------------------
 
-SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+# Sentence ends: English . ! ? and Urdu full stop ۔ / question mark ؟
+SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?۔؟])\s+(?=\S)")
+LIST_MARKER_RE = re.compile(r"^\s*(?:[-*+•]|\d+[.)])\s+")
+HR_RE = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$")
 
 
-def chunk_text(text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
-    """Pack sentences into chunks up to chunk_size chars. Each new chunk
-    carries the trailing `overlap` chars of the previous chunk forward,
-    so a fact split across a boundary is still readable from both sides.
-    Sentences longer than chunk_size (e.g. unpunctuated PDF text, URLs)
-    are hard-split into overlapping windows so no chunk ever exceeds
-    chunk_size."""
-    sentences = SENTENCE_SPLIT_RE.split(text.strip())
-    sentences = [s.strip() for s in sentences if s.strip()]
+def clean_markdown_inline(text: str) -> str:
+    """Remove markdown syntax that adds noise to embeddings and BM25."""
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)      # bold
+    text = re.sub(r"(?<!\w)\*(.+?)\*(?!\w)", r"\1", text)  # italics
+    text = re.sub(r"`([^`]*)`", r"\1", text)           # inline code
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)  # links -> text
+    text = text.replace("\\|", "|")
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
+
+
+def split_into_units(text: str, max_unit: int = CHUNK_SIZE) -> list[str]:
+    """Split prose into sentence-like units, respecting document structure:
+    each list item / blockquote line / paragraph is its own block first,
+    then blocks are split into sentences. This stops "1." in a numbered
+    list from being treated as a sentence and keeps list items whole."""
+    units = []
+    paragraph = []
+
+    def flush_paragraph():
+        if paragraph:
+            block = clean_markdown_inline(" ".join(paragraph))
+            if len(block) <= max_unit:
+                # a short paragraph (e.g. one FAQ question + answer) stays
+                # together as a single unit so it is never split apart
+                units.append(block)
+            else:
+                units.extend(s.strip() for s in SENTENCE_SPLIT_RE.split(block) if s.strip())
+            paragraph.clear()
+
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not stripped or HR_RE.match(stripped):
+            flush_paragraph()
+            continue
+        if LIST_MARKER_RE.match(stripped) or stripped.startswith(">"):
+            flush_paragraph()
+            item = LIST_MARKER_RE.sub("", stripped).lstrip("> ").strip()
+            if item:
+                units.append(clean_markdown_inline(item))
+            continue
+        paragraph.append(stripped)
+    flush_paragraph()
+    return [u for u in units if u]
+
+
+def _hard_split(sentence: str, chunk_size: int, overlap: int) -> list[str]:
+    """Split an over-long sentence on word boundaries with overlap."""
+    words = sentence.split()
+    pieces, current = [], []
+    for word in words:
+        if current and len(" ".join(current + [word])) > chunk_size:
+            pieces.append(" ".join(current))
+            carry = []
+            while current and len(" ".join([current[-1]] + carry)) <= overlap:
+                carry.insert(0, current.pop())
+            current = carry
+        current.append(word)
+    if current:
+        pieces.append(" ".join(current))
+    return pieces
+
+
+def chunk_units(units: list[str], chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP) -> list[str]:
+    """Pack sentence units into chunks of up to chunk_size characters.
+    The next chunk starts with the trailing whole sentence(s) of the
+    previous one (up to `overlap` chars) so facts at a boundary are
+    readable from both sides — without cutting words in half."""
+    expanded = []
+    for unit in units:
+        expanded.extend(_hard_split(unit, chunk_size, overlap) if len(unit) > chunk_size else [unit])
 
     chunks = []
-    current = ""
-
-    for sentence in sentences:
-        if len(sentence) > chunk_size:
-            if current.strip():
-                chunks.append(current.strip())
-
-            for i in range(0, len(sentence), chunk_size - overlap):
-                chunks.append(sentence[i:i + chunk_size].strip())
-
-            current = chunks[-1][-overlap:] if chunks else ""
-            continue
-
-        if current and len(current) + len(sentence) + 1 > chunk_size:
-            chunks.append(current.strip())
-            tail = current[-overlap:] if overlap < len(current) else current
-            current = (tail + " " + sentence).strip()
-        else:
-            current = (current + " " + sentence).strip()
-
-    if current.strip():
-        chunks.append(current.strip())
-
+    current: list[str] = []
+    for unit in expanded:
+        if current and len(" ".join(current + [unit])) > chunk_size:
+            chunks.append(" ".join(current))
+            carry = []
+            for prev in reversed(current):
+                if len(" ".join([prev] + carry)) > overlap:
+                    break
+                carry.insert(0, prev)
+            current = carry
+        current.append(unit)
+    if current:
+        chunks.append(" ".join(current))
     return chunks
 
 
+def chunk_text(text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
+    return chunk_units(split_into_units(text, chunk_size), chunk_size, overlap)
+
+
 # ---------------------------------------------------------------------------
-# Markdown ingestion — header-aware, tables kept atomic
+# Markdown ingestion — header-aware, tables row-grouped
 # ---------------------------------------------------------------------------
 
 def split_markdown_into_sections(content):
     """Split a markdown file into (header_path, body_text) sections based
     on # ## ### headers, so each chunk can carry its section context."""
-    lines = content.split("\n")
     sections = []
     header_stack = []
     buffer = []
+    in_code = False
 
     def flush():
         body = "\n".join(buffer).strip()
         if body:
             sections.append((" > ".join(header_stack), body))
 
-    for line in lines:
-        match = re.match(r"^(#{1,6})\s+(.*)", line)
+    for line in content.split("\n"):
+        if line.strip().startswith("```"):
+            in_code = not in_code
+        match = None if in_code else re.match(r"^(#{1,6})\s+(.*)", line)
         if match:
             flush()
             buffer = []
             level = len(match.group(1))
-            title = match.group(2).strip()
+            title = clean_markdown_inline(match.group(2).strip())
             header_stack = header_stack[: level - 1] + [title]
         else:
             buffer.append(line)
@@ -115,56 +207,102 @@ def split_markdown_into_sections(content):
 
 
 def extract_tables_from_text(body):
-    """Pull markdown tables (lines starting with |) out as separate atomic
-    blocks so they never get split mid-row. Returns (remaining_text, tables)."""
-    lines = body.split("\n")
-    tables = []
-    remaining = []
-    table_buffer = []
+    """Pull markdown tables (lines starting with |) out as separate blocks
+    so they never get split mid-row. Returns (remaining_text, tables)."""
+    tables, remaining, table_buffer = [], [], []
 
-    def flush_table():
-        if table_buffer:
-            tables.append("\n".join(table_buffer))
-
-    for line in lines:
+    for line in body.split("\n"):
         if line.strip().startswith("|"):
             table_buffer.append(line)
         else:
             if table_buffer:
-                flush_table()
+                tables.append(list(table_buffer))
                 table_buffer.clear()
             remaining.append(line)
-    flush_table()
+    if table_buffer:
+        tables.append(list(table_buffer))
 
     return "\n".join(remaining), tables
+
+
+def _parse_table_row(line: str) -> list[str]:
+    # split on unescaped pipes only
+    cells = re.split(r"(?<!\\)\|", line.strip().strip("|"))
+    return [clean_markdown_inline(c) for c in cells]
+
+
+def chunk_markdown_table(table_lines, rows_per_chunk=TABLE_ROWS_PER_CHUNK):
+    """Split a markdown table into row groups, each starting with the
+    header row so every chunk is self-describing."""
+    rows = [l for l in table_lines if not re.match(r"^\s*\|?\s*:?-{3,}", l)]
+    if not rows:
+        return []
+    header = _parse_table_row(rows[0])
+    body = [_parse_table_row(r) for r in rows[1:]]
+
+    def render(row_group):
+        lines = [" | ".join(header)]
+        lines += [" | ".join(r) for r in row_group]
+        return "\n".join(lines)
+
+    if not body:
+        return [render([])]
+    return [render(body[i:i + rows_per_chunk]) for i in range(0, len(body), rows_per_chunk)]
+
+
+def chunk_rows_table(rows, rows_per_chunk=TABLE_ROWS_PER_CHUNK):
+    """Same row-grouping for tables coming from pdfplumber (list of lists)."""
+    rows = [[(c or "").replace("\n", " ").strip() for c in r] for r in rows if r and any(r)]
+    if not rows:
+        return []
+    header, body = rows[0], rows[1:]
+    if not body:
+        return [" | ".join(header)]
+    return [
+        "\n".join([" | ".join(header)] + [" | ".join(r) for r in body[i:i + rows_per_chunk]])
+        for i in range(0, len(body), rows_per_chunk)
+    ]
+
+
+def contextual_header(doc_title: str, section: str) -> str:
+    # the H1 is the document title — don't repeat it inside the section path
+    if section.startswith(doc_title + " > "):
+        section = section[len(doc_title) + 3:]
+    if section and section != doc_title:
+        return f"Document: {doc_title} | Section: {section}"
+    return f"Document: {doc_title}"
 
 
 def ingest_markdown(filepath):
     with open(filepath, "r", encoding="utf-8") as f:
         content = f.read()
 
+    title_match = re.search(r"^#\s+(.+)$", content, flags=re.MULTILINE)
+    doc_title = clean_markdown_inline(title_match.group(1)) if title_match else os.path.basename(filepath)
+
     records = []
     for header_path, body in split_markdown_into_sections(content):
         prose, tables = extract_tables_from_text(body)
+        ctx = contextual_header(doc_title, header_path)
 
         for chunk in chunk_text(prose):
-            prefixed = f"{header_path}\n{chunk}" if header_path else chunk
             records.append({
-                "text": prefixed,
-                "source": filepath,
+                "text": f"{ctx}\n{chunk}",
+                "body": chunk,
+                "source": os.path.basename(filepath),
                 "section": header_path,
                 "type": "text",
             })
 
-        # tables are never split by chunk_text — one atomic chunk each
         for table in tables:
-            prefixed = f"{header_path}\n{table}" if header_path else table
-            records.append({
-                "text": prefixed,
-                "source": filepath,
-                "section": header_path,
-                "type": "table",
-            })
+            for table_chunk in chunk_markdown_table(table):
+                records.append({
+                    "text": f"{ctx}\n{table_chunk}",
+                    "body": table_chunk,
+                    "source": os.path.basename(filepath),
+                    "section": header_path,
+                    "type": "table",
+                })
 
     return records
 
@@ -175,54 +313,53 @@ def ingest_markdown(filepath):
 
 def ingest_pdf(filepath):
     records = []
+    source = os.path.basename(filepath)
+    doc_title = os.path.splitext(source)[0].replace("_", " ")
+
     with pdfplumber.open(filepath) as pdf:
         for page_number, page in enumerate(pdf.pages, start=1):
+            section = f"page {page_number}"
+            ctx = contextual_header(doc_title, section)
 
-            # Clean visual line breaks / hyphenation so sentence splitting
-            # (which relies on ". ! ?") actually works on PDF text.
-            raw_text = page.extract_text() or ""
-            text = raw_text.replace("-\n", "").replace("\n", " ")
-            text = re.sub(r"\s{2,}", " ", text)  # compress multiple spaces
+            # Remove table areas from the page before extracting prose so
+            # table cells aren't embedded twice (once as garbled prose).
+            found_tables = page.find_tables()
+            text_page = page
+            for t in found_tables:
+                try:
+                    text_page = text_page.outside_bbox(t.bbox)
+                except ValueError:
+                    pass
 
-            tables = page.extract_tables() or []
+            raw_text = text_page.extract_text() or ""
+            # join hyphenated line breaks, then turn single line breaks into
+            # spaces but keep blank lines as paragraph boundaries
+            text = raw_text.replace("-\n", "")
+            text = re.sub(r"(?<!\n)\n(?!\n)", " ", text)
+            text = re.sub(r"[ \t]{2,}", " ", text)
 
             for chunk in chunk_text(text):
                 records.append({
-                    "text": chunk,
-                    "source": filepath,
-                    "section": f"page {page_number}",
-                    "type": "text",
+                    "text": f"{ctx}\n{chunk}", "body": chunk,
+                    "source": source, "section": section, "type": "text",
                 })
 
-            for table in tables:
-                # render as pipe-separated rows so the LLM can read it
-                # the same way it reads a markdown table
-                table_text = "\n".join(
-                    " | ".join(cell or "" for cell in row) for row in table
-                )
-                if table_text.strip():
+            for t in found_tables:
+                for table_chunk in chunk_rows_table(t.extract() or []):
                     records.append({
-                        "text": table_text,
-                        "source": filepath,
-                        "section": f"page {page_number}",
-                        "type": "table",
+                        "text": f"{ctx}\n{table_chunk}", "body": table_chunk,
+                        "source": source, "section": section, "type": "table",
                     })
 
             # Placeholder chunks for images. This flags that visual content
             # exists on this page so it isn't silently dropped, but it
-            # carries no actual visual content — a question about what an
-            # image *shows* won't retrieve this chunk. Full support needs
-            # OCR (pytesseract) or a vision-model captioning step.
-            for img_index, img in enumerate(page.images):
-                image_placeholder = (
-                    f"[Visual element/Image {img_index + 1} located on "
-                    f"{filepath} Page {page_number}]"
-                )
+            # carries no actual visual content. Full support needs OCR or a
+            # vision-model captioning step.
+            for img_index, _ in enumerate(page.images):
+                placeholder = f"[Image {img_index + 1} on {source} page {page_number}]"
                 records.append({
-                    "text": image_placeholder,
-                    "source": filepath,
-                    "section": f"page {page_number}",
-                    "type": "image",
+                    "text": f"{ctx}\n{placeholder}", "body": placeholder,
+                    "source": source, "section": section, "type": "image",
                 })
 
     return records
@@ -234,18 +371,18 @@ def ingest_pdf(filepath):
 
 def collect_records():
     records = []
-    for filepath in glob.glob(f"{DOCS_DIR}/**/*.md", recursive=True):
+    for filepath in sorted(glob.glob(f"{DOCS_DIR}/**/*.md", recursive=True)):
         records.extend(ingest_markdown(filepath))
-    for filepath in glob.glob(f"{DOCS_DIR}/**/*.pdf", recursive=True):
+    for filepath in sorted(glob.glob(f"{DOCS_DIR}/**/*.pdf", recursive=True)):
         records.extend(ingest_pdf(filepath))
     return records
 
 
-def make_point_id(record, index):
-    # deterministic ID so re-running ingest on the same content doesn't
-    # create duplicate/drifting IDs across runs
-    key = f"{record['source']}::{record['section']}::{index}"
-    return int(hashlib.md5(key.encode()).hexdigest()[:16], 16) % (2**63)
+def make_point_id(record):
+    # Content-addressed, deterministic UUID: re-ingesting unchanged content
+    # yields the same ids, and editing one chunk doesn't shift the others.
+    key = f"{record['source']}::{record['section']}::{record['text']}"
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
 
 
 def main():
@@ -254,43 +391,55 @@ def main():
         print(f"No .md or .pdf files found in {DOCS_DIR}")
         return
 
-    texts = [r["text"] for r in records]
-    embeddings = model.encode(texts, batch_size=32, show_progress_bar=True)
+    # connect first, so we fail fast before spending time on embeddings
+    client = QdrantClient(url=QDRANT_URL)
+    try:
+        exists = client.collection_exists(collection_name=COLLECTION_NAME)
+    except Exception as e:
+        print(
+            f"\nCannot reach Qdrant at {QDRANT_URL} ({e.__class__.__name__}).\n"
+            "Start Docker Desktop, then run:  docker compose up -d\n"
+            "and run this script again."
+        )
+        raise SystemExit(1)
 
-    client = QdrantClient(url="http://localhost:6333")
-    
-    # Check if the collection exists and delete it to mimic 'recreate' behavior
-    if client.collection_exists(collection_name=COLLECTION_NAME):
+    texts = [r["text"] for r in records]
+    embeddings = get_model().encode(
+        texts, batch_size=32, show_progress_bar=True, normalize_embeddings=True
+    )
+
+    if exists:
         client.delete_collection(collection_name=COLLECTION_NAME)
 
-    # Create the new collection
     client.create_collection(
         collection_name=COLLECTION_NAME,
-        vectors_config=VectorParams(size=1024, distance=Distance.COSINE),
+        vectors_config={DENSE_VECTOR: VectorParams(size=1024, distance=Distance.COSINE)},
+        sparse_vectors_config={SPARSE_VECTOR: SparseVectorParams(modifier=Modifier.IDF)},
     )
 
     points = [
         PointStruct(
-            id=make_point_id(records[i], i),
-            vector=embeddings[i].tolist(),
+            id=make_point_id(r),
+            vector={
+                DENSE_VECTOR: embeddings[i].tolist(),
+                SPARSE_VECTOR: encode_document(r["text"]),
+            },
             payload={
-                "text": records[i]["text"],
-                "source": records[i]["source"],
-                "section": records[i]["section"],
-                "type": records[i]["type"],
+                "text": r["text"],
+                "body": r["body"],
+                "source": r["source"],
+                "section": r["section"],
+                "type": r["type"],
             },
         )
-        for i in range(len(records))
+        for i, r in enumerate(records)
     ]
-
     client.upsert(collection_name=COLLECTION_NAME, points=points)
 
-    md_count = len(glob.glob(f"{DOCS_DIR}/**/*.md", recursive=True))
-    pdf_count = len(glob.glob(f"{DOCS_DIR}/**/*.pdf", recursive=True))
-    print(
-        f"Uploaded {len(records)} chunks to Qdrant from "
-        f"{md_count} markdown and {pdf_count} PDF files."
-    )
+    by_type = {}
+    for r in records:
+        by_type[r["type"]] = by_type.get(r["type"], 0) + 1
+    print(f"Uploaded {len(records)} chunks to Qdrant ({by_type}) with dense + sparse vectors.")
 
 
 if __name__ == "__main__":

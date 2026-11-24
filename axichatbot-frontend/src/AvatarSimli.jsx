@@ -6,54 +6,16 @@ const API_BASE = "http://localhost:8000";
 // Exactly 6KB chunks, per CTO recommendation
 const CHUNK_SIZE = 6144; 
 
-function wavBase64ToPcm16(base64Wav) {
-  const binary = atob(base64Wav);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-
-  const view = new DataView(bytes.buffer);
-  let offset = 12;
-  while (offset < bytes.length) {
-    const chunkId = String.fromCharCode(
-      bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]
-    );
-    const chunkSize = view.getUint32(offset + 4, true);
-    if (chunkId === "data") {
-      return bytes.slice(offset + 8, offset + 8 + chunkSize);
-    }
-    offset += 8 + chunkSize;
-  }
-  console.warn("No 'data' chunk found in WAV — falling back to byte 44");
-  return bytes.slice(44);
+function describeError(err) {
+  const msg = String(err?.message || err);
+  if (msg.includes("402")) return "Avatar unavailable: Simli credits are used up.";
+  if (msg.includes("401") || msg.includes("403")) return "Avatar unavailable: check SIMLI_API_KEY.";
+  if (msg.includes("Failed to fetch")) return "Avatar unavailable: backend is not running.";
+  return "Avatar unavailable right now.";
 }
 
-// --- NEW FUNCTION: The Silence Trimmer ---
-// Scans the PCM audio backwards to find where the actual voice stops,
-// stripping out the invisible "room tone" the TTS engine leaves at the end.
-function trimTrailingSilence(pcmBytes, threshold = 150) {
-  const view = new DataView(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.byteLength);
-  let lastVoiceIndex = 0;
-  
-  // Scan backwards through the audio (2 bytes per sample for PCM16)
-  for (let i = view.byteLength - 2; i >= 0; i -= 2) {
-    const sampleAmplitude = Math.abs(view.getInt16(i, true));
-    
-    // If we hit a sound louder than our silence threshold, mark this as the true end
-    if (sampleAmplitude > threshold) {
-      lastVoiceIndex = i;
-      break;
-    }
-  }
-  
-  // Keep exactly 0.1 seconds (3200 bytes) of padding after the voice stops 
-  // to prevent an unnatural, abrupt mouth snap, but eliminate the 0.5s overshoot.
-  const safeEndIndex = Math.min(pcmBytes.length, lastVoiceIndex + 3200);
-  return pcmBytes.slice(0, safeEndIndex);
-}
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-const Avatar3D = forwardRef((props, ref) => {
+const AvatarSimli = forwardRef((props, ref) => {
   const videoRef = useRef(null);
   const audioRef = useRef(null);
   const simliClientRef = useRef(null);
@@ -61,6 +23,7 @@ const Avatar3D = forwardRef((props, ref) => {
   
   const [status, setStatus] = useState("connecting"); 
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
+  const [errorText, setErrorText] = useState("");
 
   const closeStaleClient = () => {
     simliClientRef.current?.close?.();
@@ -70,6 +33,10 @@ const Avatar3D = forwardRef((props, ref) => {
   const connectFresh = async () => {
     setStatus("connecting");
     const res = await fetch(`${API_BASE}/simli-session`);
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(`simli-session ${res.status}: ${detail.detail || ""}`);
+    }
     const { sessionToken, iceServers } = await res.json();
 
     const client = new SimliClient(
@@ -101,6 +68,7 @@ const Avatar3D = forwardRef((props, ref) => {
     await client.start();
     
     setStatus("ready");
+    setErrorText("");
     setHasLoadedOnce(true);
     return client;
   };
@@ -123,35 +91,53 @@ const Avatar3D = forwardRef((props, ref) => {
   };
 
   useEffect(() => {
-    ensureConnected();
+    // Show why Simli couldn't start (bad key, no credits, network) instead
+    // of an endless "Connecting…"; chat keeps working meanwhile.
+    ensureConnected().catch((err) => setErrorText(describeError(err)));
     return () => closeStaleClient();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useImperativeHandle(ref, () => ({
-    speak: async (base64Audio) => {
+    /**
+     * Play a streamed TTS response (raw 16 kHz mono PCM16). Audio is pushed
+     * to Simli chunk by chunk as it downloads, so the avatar starts talking
+     * as soon as the first bytes arrive instead of after the whole reply.
+     * @param {Response} response  fetch() response from POST /tts
+     * @param {AbortSignal} signal  aborted when a newer reply starts
+     */
+    speakStream: async (response, signal) => {
       let client;
       try {
-        client = await ensureConnected(); 
+        client = await ensureConnected();
       } catch {
         return;
       }
+      client.ClearBuffer?.(); // stop whatever was still being said
 
-      client.ClearBuffer?.();
-
-      let pcm = wavBase64ToPcm16(base64Audio);
-      
-      // Apply the trimmer to chop off the TTS trailing static
-      pcm = trimTrailingSilence(pcm);
-
+      const reader = response.body.getReader();
+      let pending = new Uint8Array(0);
       try {
-        for (let offset = 0; offset < pcm.length; offset += CHUNK_SIZE) {
-          client.sendAudioData(pcm.slice(offset, offset + CHUNK_SIZE));
-          await sleep(2); 
+        while (!signal?.aborted) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          // join with leftover bytes so we never split a 16-bit sample
+          const merged = new Uint8Array(pending.length + value.length);
+          merged.set(pending);
+          merged.set(value, pending.length);
+          const usable = merged.length - (merged.length % 2);
+          for (let offset = 0; offset < usable; offset += CHUNK_SIZE) {
+            client.sendAudioData(merged.slice(offset, Math.min(offset + CHUNK_SIZE, usable)));
+          }
+          pending = merged.slice(usable);
         }
       } catch (err) {
-        console.error("sendAudioData failed, discarding session:", err);
+        if (signal?.aborted) return;
+        console.error("Streaming audio to Simli failed, discarding session:", err);
         closeStaleClient();
         setStatus("error");
+      } finally {
+        if (signal?.aborted) reader.cancel().catch(() => {});
       }
     },
   }));
@@ -165,7 +151,7 @@ const Avatar3D = forwardRef((props, ref) => {
         <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "12px", zIndex: 10, background: "#111" }}>
           <img src="/logo.png" alt="" style={{ width: "56px", height: "56px", opacity: 0.6 }} />
           <div style={{ color: "#cfd8e3", fontSize: "0.9rem" }}>
-            {status === "error" ? "Reconnecting…" : "Connecting to Receptionist…"}
+            {errorText || (status === "error" ? "Reconnecting…" : "Connecting to Receptionist…")}
           </div>
         </div>
       )}
@@ -173,4 +159,4 @@ const Avatar3D = forwardRef((props, ref) => {
   );
 });
 
-export default Avatar3D;
+export default AvatarSimli;
