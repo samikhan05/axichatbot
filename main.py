@@ -1,15 +1,26 @@
-import base64
-import time
 import os
-import requests
-import soundfile as sf
-from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from rag_engine import ask, llm
+import sys
+import time
 from collections import defaultdict
+
+import requests
 from dotenv import load_dotenv
+
 load_dotenv(override=True)
+
+# Urdu text in log lines must not crash the server on a non-UTF-8 console
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+
+from rag_engine import ask_with_meta, llm, MODEL_NAME
+from language import detect_language
+from speech import transcribe, synthesize_stream, warm_up_tts
 
 conversation_store = defaultdict(list)
 MAX_HISTORY = 6
@@ -20,10 +31,8 @@ print(f"Using Simli face: {SIMLI_FACE_ID}")
 
 
 def _simli_request(method, url, **kwargs):
-    """
-    Helper function to make requests to Simli with a 3-attempt retry loop
-    and timeout to handle transient network hiccups or rate-limit glitches.
-    """
+    """Request to Simli with a 3-attempt retry loop and timeout to handle
+    transient network hiccups or rate-limit glitches."""
     last_err = None
     for attempt in range(3):
         try:
@@ -33,26 +42,16 @@ def _simli_request(method, url, **kwargs):
         except requests.exceptions.RequestException as e:
             last_err = e
             print(f"Simli request failed (attempt {attempt + 1}/3): {e}")
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status is not None and 400 <= status < 500 and status != 429:
+                raise  # bad key / bad request: retrying won't help
     raise last_err
 
 
-def normalize_wav(input_path, output_path, target_samplerate=16000):
-    """
-    Convert to mono, 16kHz, PCM16 — required by Simli's audioInputFormat="pcm16".
-    """
-    data, samplerate = sf.read(input_path)
-    if data.ndim > 1:
-        data = data.mean(axis=1)
-    if samplerate != target_samplerate:
-        import numpy as np
-        from scipy.signal import resample
-        num_samples = int(len(data) * target_samplerate / samplerate)
-        data = resample(data, num_samples)
-        samplerate = target_samplerate
-    sf.write(output_path, data, samplerate, subtype="PCM_16")
-
-
 app = FastAPI()
+
+# open Azure TTS connections now, so the first reply is not slowed by setup
+warm_up_tts()
 
 app.add_middleware(
     CORSMiddleware,
@@ -69,24 +68,95 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     reply: str
+    language: str = "en"
+    sources: list[dict] = []
+    tools: list[dict] = []
+
+
+def _answer(session_id: str, question: str, language: str | None = None) -> dict:
+    history = conversation_store[session_id]
+    result = ask_with_meta(question, conversation_history=history, language=language)
+    history.append({"user": question, "assistant": result["answer"], "language": result["language"]})
+    if len(history) > MAX_HISTORY:
+        conversation_store[session_id] = history[-MAX_HISTORY:]
+    return result
 
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest):
-    history = conversation_store[request.session_id]
-    answer = ask(request.message, conversation_history=history)
-    history.append({"user": request.message, "assistant": answer})
-    if len(history) > MAX_HISTORY:
-        conversation_store[request.session_id] = history[-MAX_HISTORY:]
-    return ChatResponse(reply=answer)
+    result = _answer(request.session_id, request.message)
+    return ChatResponse(
+        reply=result["answer"],
+        language=result["language"],
+        sources=result["sources"],
+        tools=result["tools"],
+    )
+
+
+class TTSRequest(BaseModel):
+    text: str
+    language: str | None = None
+
+
+@app.post("/tts")
+def tts(request: TTSRequest):
+    """Stream speech for a reply as raw 16 kHz mono PCM16.
+
+    Chunks are sent while Azure is still synthesising, so the client can
+    start feeding the avatar after ~0.5 s instead of waiting for the full
+    sentence. Used for both typed and spoken questions."""
+    text = request.text.strip()[:2000]
+    if not text:
+        raise HTTPException(400, "text is empty")
+    language = detect_language(text, fallback=request.language)
+
+    t0 = time.time()
+    chunks = synthesize_stream(llm, MODEL_NAME, text, language)
+    try:
+        # produce the first chunk before responding, so setup errors still
+        # return a proper error status instead of a broken stream
+        first = next(chunks)
+    except StopIteration:
+        raise HTTPException(502, "TTS produced no audio")
+    except Exception as e:
+        print(f"TTS failed: {e}")
+        raise HTTPException(502, f"TTS failed: {e}")
+    print(f"TTS first audio after {time.time() - t0:.2f}s ({language})")
+
+    def body():
+        yield first
+        try:
+            yield from chunks
+        except Exception as e:
+            print(f"TTS stream interrupted: {e}")
+
+    return StreamingResponse(
+        body(),
+        media_type="application/octet-stream",
+        headers={"X-Audio-Format": "pcm16; rate=16000; channels=1"},
+    )
 
 
 @app.get("/simli-session")
 def get_simli_session():
-    """
-    Fetches a short-lived Simli session token + ICE servers server-side.
-    Uses retry wrapper to prevent ConnectionResetError or transient drops.
-    """
+    """Fetches a short-lived Simli session token + ICE servers server-side."""
+    if not SIMLI_API_KEY or not SIMLI_FACE_ID:
+        raise HTTPException(503, "SIMLI_API_KEY / SIMLI_FACE_ID missing in .env")
+    try:
+        return _fetch_simli_session()
+    except requests.exceptions.HTTPError as e:
+        status = e.response.status_code if e.response is not None else 502
+        hint = {
+            401: " (check SIMLI_API_KEY in .env)",
+            403: " (check SIMLI_API_KEY in .env)",
+            402: " (Simli credits used up: add credits in the Simli dashboard)",
+        }.get(status, "")
+        raise HTTPException(502, f"Simli returned {status}{hint}")
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(502, f"Could not reach Simli: {e.__class__.__name__}")
+
+
+def _fetch_simli_session():
     token_res = _simli_request(
         "POST",
         "https://api.simli.ai/compose/token",
@@ -97,7 +167,7 @@ def get_simli_session():
             "maxSessionLength": 3600,
             "maxIdleTime": 180,
             "audioInputFormat": "pcm16",
-            "model": "arttalk",   # try this if not already set
+            "model": "arttalk",
         },
     )
     token_data = token_res.json()
@@ -108,62 +178,45 @@ def get_simli_session():
         "https://api.simli.ai/compose/ice",
         headers={"x-simli-api-key": SIMLI_API_KEY},
     )
-    ice_servers = ice_res.json()
-
-    return {"sessionToken": session_token, "iceServers": ice_servers}
+    return {"sessionToken": session_token, "iceServers": ice_res.json()}
 
 
+# Plain `def` (not `async def`): STT, the LLM and TTS are all blocking calls,
+# so FastAPI runs this in its threadpool instead of freezing the event loop
+# for every other visitor while one request is being processed.
 @app.post("/voice-chat")
-async def voice_chat(
+def voice_chat(
     audio: UploadFile = File(...),
-    session_id: str = Form(default="default")
+    session_id: str = Form(default="default"),
 ):
     t0 = time.time()
-    audio_bytes = await audio.read()
-    temp_path = "temp_input.webm"
-    with open(temp_path, "wb") as f:
-        f.write(audio_bytes)
+    # kept in memory — no shared temp file, so concurrent requests can't
+    # overwrite each other's audio
+    audio_bytes = audio.file.read()
 
-    with open(temp_path, "rb") as f:
-        transcription = llm.audio.transcriptions.create(
-            model="whisper-large-v3",
-            file=f,
-            language="en",
-        )
-    question_text = transcription.text
+    question_text, spoken_language = transcribe(llm, audio_bytes, audio.filename or "audio.webm")
     t1 = time.time()
-    print(f"STT took {t1 - t0:.2f}s")
+    print(f"STT took {t1 - t0:.2f}s | language={spoken_language} | text={question_text!r}")
 
-    history = conversation_store[session_id]
-    answer_text = ask(question_text, conversation_history=history)
-    history.append({"user": question_text, "assistant": answer_text})
-    if len(history) > MAX_HISTORY:
-        conversation_store[session_id] = history[-MAX_HISTORY:]
+    if not question_text:
+        return {
+            "transcript": "",
+            "reply": "Sorry, I didn't catch that. Could you please say it again?",
+            "language": "en",
+            "sources": [],
+            "tools": [],
+        }
 
-    t2 = time.time()
-    print(f"RAG+LLM took {t2 - t1:.2f}s")
+    result = _answer(session_id, question_text, language=spoken_language)
+    answer_text = result["answer"]
+    print(f"RAG+LLM took {time.time() - t1:.2f}s | Total: {time.time() - t0:.2f}s")
 
-    speech_response = llm.audio.speech.create(
-        model="canopylabs/orpheus-v1-english",
-        voice="diana",
-        input=answer_text,
-        response_format="wav",
-    )
-    audio_data = speech_response.content
-    with open("last_response.wav", "wb") as f:
-        f.write(audio_data)
-
-    # Normalize to 16kHz mono PCM16 — required by Simli's audioInputFormat
-    normalize_wav("last_response.wav", "last_response_normalized.wav")
-    with open("last_response_normalized.wav", "rb") as f:
-        normalized_bytes = f.read()
-    audio_base64 = base64.b64encode(normalized_bytes).decode("utf-8")
-
-    t3 = time.time()
-    print(f"TTS took {t3 - t2:.2f}s | Total: {t3 - t0:.2f}s")
-
+    # Speech is streamed separately via /tts, so the text appears right away
+    # and the avatar starts talking as soon as the first audio chunk is ready.
     return {
         "transcript": question_text,
         "reply": answer_text,
-        "audio_base64": audio_base64,
+        "language": result["language"],
+        "sources": result["sources"],
+        "tools": result["tools"],
     }
